@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Room Automation - 3D Working Model</title>
+<style>
+  :root{--bg:#0f1220;--panel:#181c30;--line:#2c3252;--text:#e8ebf7;--mute:#9aa3c7;--on:#3ddc84;--off:#ff6b6b}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Arial,sans-serif;display:flex;height:100vh;overflow:hidden}
+  #view{flex:1;position:relative;min-width:0}
+  canvas{display:block;width:100%;height:100%;cursor:grab}
+  canvas:active{cursor:grabbing}
+  .hint{position:absolute;left:14px;bottom:12px;font-size:12px;color:var(--mute);background:#0f1220aa;padding:6px 10px;border-radius:8px}
+  .tag{position:absolute;left:14px;top:12px;font-weight:700;font-size:15px;background:#0f1220aa;padding:8px 12px;border-radius:8px}
+  .tag small{display:block;font-weight:400;color:var(--mute);font-size:11px;margin-top:2px}
+  aside{width:340px;background:var(--panel);border-left:1px solid var(--line);padding:16px;overflow-y:auto}
+  h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--mute);margin:18px 0 8px}
+  h2:first-child{margin-top:0}
+  .row{display:flex;gap:8px;margin-bottom:8px}
+  button{flex:1;padding:10px;border-radius:8px;border:1px solid var(--line);background:#222849;color:var(--text);font-size:13px;cursor:pointer}
+  button:hover{background:#2b3260}
+  button.active{background:#3a4388;border-color:#6b78d9}
+  label{font-size:13px;display:block;margin:6px 0 4px}
+  input[type=range]{width:100%}
+  .state{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .card{background:#11142a;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px}
+  .card b{display:block;font-size:15px;margin-top:2px}
+  .lamp{display:inline-block;width:10px;height:10px;border-radius:50%;background:#555;margin-right:6px;vertical-align:middle}
+  .lamp.on{background:var(--on);box-shadow:0 0 8px var(--on)}
+  .lamp.red{background:var(--off)}
+  pre{margin:0;background:#080a16;border:1px solid var(--line);border-radius:8px;padding:8px;height:130px;overflow-y:auto;font-size:12px;color:#8bf0b0;font-family:Consolas,monospace}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  td,th{border:1px solid var(--line);padding:4px 6px;text-align:left}
+  th{background:#11142a}
+  tr.hit td{background:#2a3a66}
+  .pin{font-size:12px;color:var(--mute);line-height:1.6}
+  @media(max-width:800px){body{flex-direction:column;overflow:auto;height:auto}#view{height:60vh;flex:none}aside{width:100%}}
+</style>
+</head>
+<body>
+<div id="view">
+  <canvas id="c"></canvas>
+  <div class="tag">Smart Room Automation (ESP32)<small>PIR + LDR to ESP32 to LED</small></div>
+  <div class="hint">Drag to rotate - scroll to zoom</div>
+</div>
+<aside>
+  <h2>Inputs</h2>
+  <div class="row">
+    <button id="bMotion">Person enters / moves</button>
+  </div>
+  <div class="row">
+    <button id="bAuto">Auto demo</button>
+    <button id="bReset">Reset view</button>
+  </div>
+  <label for="sun">Daylight through window: <span id="sunVal">80</span>%</label>
+  <input type="range" id="sun" min="0" max="100" value="80">
+
+  <h2>Live signals</h2>
+  <div class="state">
+    <div class="card"><span class="lamp" id="lMotion"></span>PIR (GPIO 27)<b id="vMotion">LOW</b></div>
+    <div class="card"><span class="lamp" id="lDark"></span>LDR DO (GPIO 34)<b id="vDark">LOW (bright)</b></div>
+    <div class="card"><span class="lamp" id="lLed"></span>LED (GPIO 26)<b id="vLed">OFF</b></div>
+    <div class="card">Rule<b>motion AND dark</b></div>
+  </div>
+
+  <h2>Serial monitor</h2>
+  <pre id="log"></pre>
+
+  <h2>Truth table</h2>
+  <table>
+    <tr><th>Motion</th><th>Room</th><th>LED</th></tr>
+    <tr id="r1"><td>Yes</td><td>Dark</td><td>ON</td></tr>
+    <tr id="r2"><td>Yes</td><td>Bright</td><td>OFF</td></tr>
+    <tr id="r3"><td>No</td><td>Dark</td><td>OFF</td></tr>
+    <tr id="r4"><td>No</td><td>Bright</td><td>OFF</td></tr>
+  </table>
+
+  <h2>Pin map</h2>
+  <div class="pin">PIR D to GPIO 27<br>LDR DO to GPIO 34<br>LED via resistor to GPIO 26<br>Sensors powered from 3V3, common GND</div>
+</aside>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  if(typeof THREE==='undefined'){
+    document.getElementById('view').innerHTML='<p style="padding:30px">Could not load the 3D library. Connect to the internet and reopen this file.</p>';
+    return;
+  }
+  const canvas=document.getElementById('c');
+  const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.shadowMap.enabled=true;
+  const scene=new THREE.Scene();
+  scene.background=new THREE.Color(0x0f1220);
+  const camera=new THREE.PerspectiveCamera(45,1,0.1,100);
+
+  // ---- orbit by hand ----
+  let theta=0.75,phi=1.0,dist=15,target=new THREE.Vector3(0,2,0);
+  const home={theta,phi,dist};
+  function placeCam(){
+    camera.position.set(
+      target.x+dist*Math.sin(phi)*Math.sin(theta),
+      target.y+dist*Math.cos(phi),
+      target.z+dist*Math.sin(phi)*Math.cos(theta));
+    camera.lookAt(target);
+  }
+  let drag=false,px=0,py=0;
+  canvas.addEventListener('pointerdown',e=>{drag=true;px=e.clientX;py=e.clientY;canvas.setPointerCapture(e.pointerId)});
+  canvas.addEventListener('pointerup',()=>drag=false);
+  canvas.addEventListener('pointermove',e=>{
+    if(!drag)return;
+    theta-=(e.clientX-px)*0.008;
+    phi=Math.min(1.5,Math.max(0.25,phi-(e.clientY-py)*0.008));
+    px=e.clientX;py=e.clientY;
+  });
+  canvas.addEventListener('wheel',e=>{e.preventDefault();dist=Math.min(28,Math.max(7,dist+e.deltaY*0.01))},{passive:false});
+  document.getElementById('bReset').onclick=()=>{theta=home.theta;phi=home.phi;dist=home.dist};
+
+  // ---- lights ----
+  const ambient=new THREE.AmbientLight(0xffffff,0.5);
+  scene.add(ambient);
+  const sunLight=new THREE.DirectionalLight(0xfff2c0,0.6);
+  sunLight.position.set(-12,6,2);
+  scene.add(sunLight);
+  const roomLight=new THREE.PointLight(0xffe9a8,0,22,1.5);
+  roomLight.position.set(0,4.2,-4.2);
+  scene.add(roomLight);
+
+  const M=(c,o={})=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.6,metalness:.1},o));
+  function add(geo,mat,x,y,z,parent){const m=new THREE.Mesh(geo,mat);m.position.set(x,y,z);(parent||scene).add(m);return m}
+
+  // ---- room ----
+  add(new THREE.BoxGeometry(12,0.3,12),M(0x8a1f8f),0,-0.15,0);
+  add(new THREE.BoxGeometry(12,7,0.3),M(0x4a1550),0,3.5,-6);
+  add(new THREE.BoxGeometry(0.3,7,12),M(0x5a1a60),-6,3.5,0);
+
+  // window panel on side wall (glows with daylight)
+  const winMat=M(0xc9b21a,{emissive:0xffe97a,emissiveIntensity:0.8});
+  add(new THREE.BoxGeometry(0.1,3.2,3.4),winMat,-5.8,3.6,0);
+  const sunBeam=new THREE.SpotLight(0xfff0b0,1,24,0.7,0.6);
+  sunBeam.position.set(-5.5,3.6,0);
+  sunBeam.target.position.set(3,0,0);
+  scene.add(sunBeam);scene.add(sunBeam.target);
+
+  // ---- PIR (green dome on blue board) ----
+  add(new THREE.BoxGeometry(2.2,1.8,0.15),M(0x1d3fa8),-3,4.2,-5.8);
+  const dome=add(new THREE.SphereGeometry(0.65,24,16,0,Math.PI*2,0,Math.PI/2),M(0x2fbf5a),-3,4.2,-5.7);
+  dome.rotation.x=Math.PI/2;
+  const pirRing=add(new THREE.RingGeometry(0.8,0.95,32),new THREE.MeshBasicMaterial({color:0x3ddc84,transparent:true,opacity:0,side:THREE.DoubleSide}),-3,4.2,-5.5);
+  const pirCone=add(new THREE.ConeGeometry(4.2,7,32,1,true),new THREE.MeshBasicMaterial({color:0x3ddc84,transparent:true,opacity:0.06,side:THREE.DoubleSide,depthWrite:false}),-3,2.6,-2.4);
+  pirCone.rotation.x=-Math.PI/2;pirCone.position.set(-3,4.2,-2.3);
+
+  // ---- LDR module (purple board) ----
+  add(new THREE.BoxGeometry(2.4,1.3,0.15),M(0x8d3fc4),3.2,4.2,-5.8);
+  add(new THREE.CylinderGeometry(0.3,0.3,0.15,20),M(0xd6a84a),3.2,4.3,-5.65).rotation.x=Math.PI/2;
+  const ldrGlow=add(new THREE.SphereGeometry(0.12,12,12),new THREE.MeshBasicMaterial({color:0x3ddc84}),4.0,4.0,-5.6);
+  for(let i=0;i<4;i++)add(new THREE.BoxGeometry(0.08,0.4,0.08),M(0xcccccc),2.5+i*0.3,3.45,-5.8);
+
+  // ---- LED (red base, blue top) ----
+  add(new THREE.CylinderGeometry(0.45,0.5,0.5,20),M(0xc62828),0,3.8,-5.5);
+  const bulb=add(new THREE.CylinderGeometry(0.3,0.3,1.4,20),M(0x1f5fd8,{emissive:0x000000}),0,4.6,-5.5);
+  const halo=add(new THREE.SphereGeometry(1.1,24,24),new THREE.MeshBasicMaterial({color:0xffe27a,transparent:true,opacity:0}),0,4.6,-5.5);
+
+  // ---- table + ESP32 ----
+  const tbl=new THREE.Group();scene.add(tbl);
+  add(new THREE.BoxGeometry(4.4,0.25,3),M(0x14c46a),0,1.6,0,tbl);
+  [[-2,-1.3],[2,-1.3],[-2,1.3],[2,1.3]].forEach(p=>add(new THREE.BoxGeometry(0.2,1.6,0.2),M(0x14c46a),p[0],0.8,p[1],tbl));
+  add(new THREE.BoxGeometry(3.4,0.12,1.7),M(0xa0443a),0,1.8,0,tbl);
+  add(new THREE.BoxGeometry(1.0,0.14,1.2),M(0x1d2fa0),-1.0,1.88,0,tbl);
+  const espLed=add(new THREE.BoxGeometry(0.3,0.1,0.3),M(0x22aa44,{emissive:0x22aa44,emissiveIntensity:0.8}),0.2,1.9,0,tbl);
+  add(new THREE.BoxGeometry(0.4,0.2,0.5),M(0x1a1a6a),1.55,1.9,0.1,tbl);
+
+  // ---- wires (signal paths) ----
+  function wire(pts,color){
+    const g=new THREE.BufferGeometry().setFromPoints(pts.map(p=>new THREE.Vector3(...p)));
+    const m=new THREE.Line(g,new THREE.LineBasicMaterial({color}));scene.add(m);return m;
+  }
+  const wPir=wire([[-3,3.2,-5.7],[-3,2.2,-4],[-0.5,1.95,-0.2]],0x555555);
+  const wLdr=wire([[3.2,3.4,-5.7],[3.2,2.2,-4],[0.8,1.95,-0.2]],0x555555);
+  const wLed=wire([[0,3.5,-5.5],[0,2.2,-3.5],[0.4,1.95,-0.2]],0x555555);
+
+  // ---- person ----
+  const person=new THREE.Group();
+  add(new THREE.CylinderGeometry(0.35,0.4,1.5,16),M(0x2a7ae4),0,1.6,0,person);
+  add(new THREE.SphereGeometry(0.38,16,16),M(0xf2c9a0),0,2.65,0,person);
+  add(new THREE.BoxGeometry(0.28,1.1,0.28),M(0x1a3a70),-0.18,0.55,0,person);
+  add(new THREE.BoxGeometry(0.28,1.1,0.28),M(0x1a3a70),0.18,0.55,0,person);
+  person.position.set(-3.2,0,3);
+  person.visible=false;
+  scene.add(person);
+
+  // ---- state + logic ----
+  const $=id=>document.getElementById(id);
+  let motion=false,sunPct=80,ledOn=false,lastMsg='',personPhase=0;
+  const log=$('log');
+  function println(t){log.textContent+=t+'\n';log.scrollTop=log.scrollHeight;if(log.textContent.length>3000)log.textContent=log.textContent.slice(-2000)}
+
+  function evaluate(){
+    const dark=sunPct<35;               // LDR DO threshold
+    const on=motion&&dark;
+    ledOn=on;
+    $('vMotion').textContent=motion?'HIGH':'LOW';
+    $('lMotion').className='lamp'+(motion?' on':'');
+    $('vDark').textContent=dark?'HIGH (dark)':'LOW (bright)';
+    $('lDark').className='lamp'+(dark?' on':'');
+    $('vLed').textContent=on?'ON':'OFF';
+    $('lLed').className='lamp '+(on?'on':'red');
+    ['r1','r2','r3','r4'].forEach(i=>$(i).className='');
+    $(motion?(dark?'r1':'r2'):(dark?'r3':'r4')).className='hit';
+    const msg=on?'lights on':'light off';
+    if(msg!==lastMsg){println(msg);lastMsg=msg}
+    return {dark,on};
+  }
+
+  // ---- controls ----
+  const bM=$('bMotion');
+  bM.onclick=()=>{motion=!motion;bM.classList.toggle('active',motion);evaluate()};
+  $('sun').oninput=e=>{sunPct=+e.target.value;$('sunVal').textContent=sunPct;evaluate()};
+
+  let auto=false,autoT=0;
+  $('bAuto').onclick=()=>{
+    auto=!auto;$('bAuto').classList.toggle('active',auto);autoT=0;
+  };
+  const steps=[ // [motion, daylight, seconds]
+    [false,80,2],[true,80,3],[true,10,3],[false,10,3],[false,80,2]];
+  let stepIdx=-1,stepEnd=0;
+  function runAuto(t){
+    if(!auto)return;
+    if(t>=stepEnd){
+      stepIdx=(stepIdx+1)%steps.length;
+      const s=steps[stepIdx];
+      motion=s[0];sunPct=s[1];stepEnd=t+s[2];
+      bM.classList.toggle('active',motion);
+      $('sun').value=sunPct;$('sunVal').textContent=sunPct;
+      evaluate();
+    }
+  }
+
+  // ---- animate ----
+  function resize(){
+    const v=$('view');
+    renderer.setSize(v.clientWidth,v.clientHeight,false);
+    camera.aspect=v.clientWidth/v.clientHeight;camera.updateProjectionMatrix();
+  }
+  addEventListener('resize',resize);resize();
+
+  let curLight=0,curSun=0.8,pulse=0;
+  function frame(ms){
+    const t=ms/1000;
+    runAuto(t);
+    placeCam();
+
+    // smooth fades
+    const targetLight=ledOn?1:0;
+    curLight+=(targetLight-curLight)*0.12;
+    curSun+=(sunPct/100-curSun)*0.1;
+
+    roomLight.intensity=curLight*2.2;
+    bulb.material.emissive.setHex(0xffe27a);
+    bulb.material.emissiveIntensity=curLight*1.4;
+    bulb.material.color.setHex(curLight>0.5?0xfff0b0:0x1f5fd8);
+    halo.material.opacity=curLight*0.25;
+
+    ambient.intensity=0.18+curSun*0.55;
+    sunLight.intensity=curSun*0.8;
+    sunBeam.intensity=curSun*1.3;
+    winMat.emissiveIntensity=0.1+curSun*0.9;
+    scene.background.setRGB(0.04+curSun*0.04,0.05+curSun*0.04,0.1+curSun*0.04);
+
+    // PIR indicator + person
+    person.visible=motion;
+    if(motion){
+      personPhase+=0.05;
+      person.position.x=-3+Math.sin(personPhase)*2.5;
+      person.position.z=3+Math.cos(personPhase*0.8)*1.2;
+      person.rotation.y=Math.cos(personPhase)*0.6;
+    }
+    pirRing.material.opacity=motion?0.5+0.4*Math.sin(t*8):0;
+    pirCone.material.opacity=motion?0.12:0.04;
+    pirCone.material.color.setHex(motion?0x3ddc84:0x777777);
+
+    // LDR indicator
+    const dark=sunPct<35;
+    ldrGlow.material.color.setHex(dark?0x3ddc84:0x444444);
+
+    // wires carry signals
+    wPir.material.color.setHex(motion?0x3ddc84:0x555555);
+    wLdr.material.color.setHex(dark?0x3ddc84:0x555555);
+    wLed.material.color.setHex(ledOn?0xffe27a:0x555555);
+    espLed.material.emissiveIntensity=0.5+0.5*Math.abs(Math.sin(t*3));
+
+    renderer.render(scene,camera);
+    requestAnimationFrame(frame);
+  }
+  evaluate();
+  println('ets Jul 29 2019 12:21:46');
+  println('rst:0x1 (POWERON_RESET)');
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
